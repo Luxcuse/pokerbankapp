@@ -3990,7 +3990,21 @@ function Lobby({
   onSeats
 }) {
   const [showQR, setShowQR] = useState(true);
+  const [copy, setCopy] = useState(null); // null | 'done' | 'manual'
   const url = roomUrl(code);
+
+  /* The link carries the connection settings, so a guest opening it
+     needs no setup. Handy for sharing in a group chat, and the only
+     way to move a room onto a second browser for testing. */
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopy("done");
+      setTimeout(() => setCopy(null), 2000);
+    } catch {
+      setCopy("manual");
+    }
+  };
   const roles = g.roles ?? defaultRoles(g.players);
   const ready = rolesValid(g.players, roles);
   const joined = g.players.filter(p => seats[p.id]).length;
@@ -4009,7 +4023,15 @@ function Lobby({
     text: url
   }), /*#__PURE__*/React.createElement("p", {
     className: "hint center"
-  }, "카메라로 찍으면 바로 들어옵니다")), /*#__PURE__*/React.createElement("section", {
+  }, "카메라로 찍으면 바로 들어옵니다"), /*#__PURE__*/React.createElement("button", {
+    className: "btn ghost",
+    onClick: copyLink
+  }, copy === "done" ? "복사했습니다" : "링크 복사"), copy === "manual" && /*#__PURE__*/React.createElement("input", {
+    className: "link-out",
+    readOnly: true,
+    value: url,
+    onFocus: e => e.target.select()
+  })), /*#__PURE__*/React.createElement("section", {
     className: "panel"
   }, /*#__PURE__*/React.createElement("h2", {
     className: "panel-title"
@@ -4304,11 +4326,10 @@ function seatPos(i, n, r) {
 /* One chip travelling from a seat to the pot. Mounts at the seat,
    then transitions to centre on the next frame. */
 function Fly({
-  seat,
-  n,
+  from,
   amount
 }) {
-  const [at, setAt] = useState(() => seatPos(seat, n, R_SEAT));
+  const [at, setAt] = useState(from);
   useEffect(() => {
     let raf2;
     const raf1 = requestAnimationFrame(() => {
@@ -4339,10 +4360,15 @@ function Felt({
   const n = g.players.length;
   const pot = potTotal(g.players, h.s);
   const actorId = h.showdown ? null : g.players[h.toAct]?.id;
-  const points = g.players.map((_, i) => {
-    const q = seatPos(i, n, R_SEAT);
-    return `${q.x},${q.y}`;
-  }).join(" ");
+
+  /* Everyone sees the same table from their own chair: rotate the
+     seats so the viewer is at 6 o'clock. Only the drawing position
+     moves — seat order, and therefore action order, is untouched.
+     With no seat of your own (host-only, or single device) seat 1
+     stays at the bottom. */
+  const rot = me != null ? Math.max(0, g.players.findIndex(p => p.id === me)) : 0;
+  const at = (i, r) => seatPos((i - rot + n) % n, n, r);
+  const points = g.players.map((_, i) => `${at(i, R_SEAT).x},${at(i, R_SEAT).y}`).join(" ");
   const badge = i => [i === h.btnIdx && "D", i === h.sbIdx && "SB", i === h.bbIdx && "BB"].filter(Boolean).join("/");
   return /*#__PURE__*/React.createElement("div", {
     className: "ring",
@@ -4364,13 +4390,17 @@ function Felt({
     className: "pot-label"
   }, "팟")), g.players.map((p, i) => {
     const st = h.s[p.id];
-    const seat = seatPos(i, n, R_SEAT);
-    const mark = seatPos(i, n, R_BET);
+    const seat = at(i, R_SEAT);
+    const mark = at(i, R_BET);
     const tag = badge(i);
+    const isMe = p.id === me;
+    const isActor = p.id === actorId;
+    /* amber = whoever is to act, blue = you, violet = your turn */
+    const mood = isMe && isActor ? " is-mine-actor" : isActor ? " is-actor" : isMe ? " is-mine" : "";
     return /*#__PURE__*/React.createElement(React.Fragment, {
       key: p.id
     }, /*#__PURE__*/React.createElement("div", {
-      className: "node" + (p.id === actorId ? " is-actor" : "") + (p.id === me ? " is-mine" : "") + (!st.live ? " is-folded" : ""),
+      className: "node" + mood + (!st.live ? " is-folded" : ""),
       style: {
         left: `${seat.x}%`,
         top: `${seat.y}%`
@@ -4379,7 +4409,7 @@ function Felt({
       className: "node-top"
     }, /*#__PURE__*/React.createElement("span", {
       className: "nname"
-    }, p.name), p.id === me && /*#__PURE__*/React.createElement("span", {
+    }, p.name), isMe && /*#__PURE__*/React.createElement("span", {
       className: "dealer mine"
     }, "나"), tag && /*#__PURE__*/React.createElement("span", {
       className: "dealer"
@@ -4390,7 +4420,7 @@ function Felt({
     }, "폴드"), st.live && st.allIn && /*#__PURE__*/React.createElement("span", {
       className: "nstate allin"
     }, "올인")), st.live && st.bet > 0 && /*#__PURE__*/React.createElement("div", {
-      className: "betmark num",
+      className: "betmark num" + (isMe ? " mine" : ""),
       style: {
         left: `${mark.x}%`,
         top: `${mark.y}%`
@@ -4398,8 +4428,7 @@ function Felt({
     }, fmt(st.bet)));
   }), flies.map(f => /*#__PURE__*/React.createElement(Fly, {
     key: f.key,
-    seat: f.seat,
-    n: n,
+    from: at(f.seat, R_SEAT),
     amount: f.amount
   })));
 }
@@ -4493,7 +4522,8 @@ function Table({
     st: h.s[actor.id],
     currentBet: h.currentBet,
     note: h.log[0],
-    proxy: ctl.me !== null && actor.id !== ctl.me,
+    proxy: ctl.me != null && actor.id !== ctl.me,
+    mine: ctl.me != null && actor.id === ctl.me,
     onAct: ctl.act,
     openRaise: () => setRaiseOpen(true)
   }) : /*#__PURE__*/React.createElement("div", {
@@ -4643,6 +4673,7 @@ function ActionBar({
   currentBet,
   note,
   proxy,
+  mine,
   onAct,
   openRaise
 }) {
@@ -4654,8 +4685,8 @@ function ActionBar({
   }, /*#__PURE__*/React.createElement("p", {
     className: "log"
   }, note ?? "\u00a0"), /*#__PURE__*/React.createElement("p", {
-    className: "turn"
-  }, /*#__PURE__*/React.createElement("b", null, actor.name), " 차례", toCall > 0 && /*#__PURE__*/React.createElement("span", {
+    className: "turn" + (mine ? " mine" : "")
+  }, /*#__PURE__*/React.createElement("b", null, mine ? "내" : actor.name), " 차례", toCall > 0 && /*#__PURE__*/React.createElement("span", {
     className: "num"
   }, " · 콜 ", fmt(Math.min(toCall, actor.stack))), proxy && /*#__PURE__*/React.createElement("span", {
     className: "proxy"
@@ -4846,6 +4877,7 @@ const CSS = `
   --ink:#141922; --raised:#1D242F; --edge:#2C3644;
   --bone:#E9E4D8; --dim:#7E8A9C;
   --amber:#E8A33D; --clay:#C0503F; --jade:#3E8E6E;
+  --azure:#4C9BE8; --violet:#A576E0;
   font-family:Archivo,-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
   background:var(--ink); color:var(--bone);
   min-height:100vh; -webkit-font-smoothing:antialiased;
@@ -4950,7 +4982,11 @@ const CSS = `
 .node{position:absolute; transform:translate(-50%,-50%); width:88px; text-align:center;
   background:var(--raised); border:1px solid transparent; border-radius:11px;
   padding:7px 4px 8px; transition:border-color .15s, background .15s;}
-.node.is-actor{border-color:var(--amber); background:#232A22;}
+/* amber = whoever is to act · blue = you · violet = your turn */
+.node.is-actor{border-color:var(--amber); background:#262A20;}
+.node.is-mine{border-color:var(--azure); background:#1A2431;}
+.node.is-mine-actor{border-color:var(--violet); background:#251F33;
+  box-shadow:0 0 0 3px rgba(165,118,224,.24);}
 .node.is-folded{opacity:.35;}
 .node-top{display:flex; align-items:center; justify-content:center; gap:4px;}
 .nname{font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
@@ -4959,6 +4995,7 @@ const CSS = `
 .nstate{display:block; font-size:11px; color:var(--dim); margin-top:2px;}
 .nstate.allin{color:var(--clay); font-weight:600;}
 
+.betmark.mine{background:#24405C; color:#CFE4F7;}
 .betmark{position:absolute; transform:translate(-50%,-50%);
   background:#2E3947; color:var(--bone); font-size:12px; font-weight:600;
   padding:3px 9px; border-radius:20px; white-space:nowrap;
@@ -4976,6 +5013,7 @@ const CSS = `
 .log{text-align:center; font-size:13px; color:var(--dim); min-height:18px;}
 .turn{text-align:center; font-size:15px; color:var(--dim);}
 .turn b{color:var(--bone);}
+.turn.mine b{color:var(--violet);}
 .acts{display:flex; gap:8px;}
 .acts .btn{flex:1; padding:19px 8px; font-size:16px;}
 .acts .btn.primary{flex:1.15;}
@@ -5046,8 +5084,8 @@ const CSS = `
 
 .meta .code{font-style:normal; font-weight:700; letter-spacing:.12em; color:var(--bone);
   margin-right:12px;}
-.dealer.mine{background:var(--amber); color:#20160A;}
-.node.is-mine{box-shadow:0 0 0 1px var(--dim) inset;}
+.dealer.mine{background:var(--azure); color:#08131F;}
+.node.is-mine-actor .dealer.mine{background:var(--violet); color:#150C21;}
 .waiting{text-align:center; font-size:15px; color:var(--dim); padding:16px 0;}
 .waiting b{color:var(--bone);}
 .proxy{display:inline-block; margin-left:8px; font-size:11px; font-weight:600;
@@ -5076,6 +5114,10 @@ const CSS = `
 
 .offline{position:sticky; top:0; z-index:30; background:var(--clay); color:#fff;
   font-size:13px; font-weight:600; text-align:center; padding:7px 12px;}
+
+
+.link-out{font-size:12px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  text-align:center; width:100%;}
 
 @media (prefers-reduced-motion:reduce){ .pb-root *{transition:none !important;} }
 `;
