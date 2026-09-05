@@ -2820,26 +2820,42 @@ const noBlinds = blinds => blinds.sb === 0 && blinds.bb === 0;
 /* Denominations climb from the smallest chip on the ladder Korean cash
    already uses: 500 → 500 / 1천 / 5천 / 1만 / 5만. */
 const CHIP_LADDER = [1, 2, 10, 20, 100];
+/* Casino clay: a rim, six edge spots, an inset centre, a face value. */
 const CHIP_FACES = [{
-  bg: "#EDE7DA",
-  rim: "#B9B1A0",
-  fg: "#20242C"
+  bg: "#E4DCCA",
+  inner: "#F1ECE1",
+  spot: "#8B95A6",
+  rim: "#ADA391",
+  edge: "#CDC3AF",
+  fg: "#23272F"
 }, {
-  bg: "#C4453A",
-  rim: "#8E2E26",
-  fg: "#FFF3F0"
+  bg: "#B23A2E",
+  inner: "#C6493B",
+  spot: "#F0E6DC",
+  rim: "#7C271F",
+  edge: "#8F3026",
+  fg: "#FFF4F1"
 }, {
-  bg: "#3B8F6B",
-  rim: "#26644A",
-  fg: "#F0FFF8"
+  bg: "#2F7D5E",
+  inner: "#3B9370",
+  spot: "#E9F4EE",
+  rim: "#1E5741",
+  edge: "#256A4F",
+  fg: "#F1FFF8"
 }, {
-  bg: "#2C3340",
-  rim: "#59637A",
+  bg: "#252A34",
+  inner: "#333B4A",
+  spot: "#C4CCDC",
+  rim: "#5A6377",
+  edge: "#1D212A",
   fg: "#E9E4D8"
 }, {
-  bg: "#7A55A8",
-  rim: "#523379",
-  fg: "#F6EFFF"
+  bg: "#65458E",
+  inner: "#7A55A8",
+  spot: "#EEE4FA",
+  rim: "#452B69",
+  edge: "#543A77",
+  fg: "#F7F1FF"
 }];
 const chipDenoms = unit => CHIP_LADDER.map(m => unit * m);
 function shortAmt(v) {
@@ -4590,52 +4606,142 @@ function Fly({
   }, fmt(amount));
 }
 
-/* The viewer's own stack, broken into chips. Purely a reading of the
-   number already on their seat — chips are never moved around, because
-   in a real game the banker makes change without anyone thinking. */
-function ChipTray({
-  owner,
+/* One drawn stack of a single denomination. Ellipses in perspective:
+   the pile below, then the top face with rim spots and a value. */
+function ChipStack({
+  value,
+  count,
+  face,
+  scale = 1
+}) {
+  const rx = 19,
+    ry = 11,
+    step = 4.2,
+    pad = 1.5;
+  const drawn = Math.min(count, 5);
+  const w = rx * 2 + pad * 2;
+  const h = ry * 2 + (drawn - 1) * step + pad * 2;
+  const cx = w / 2;
+  const topCy = pad + ry;
+  const spots = [0, 60, 120, 180, 240, 300];
+  return /*#__PURE__*/React.createElement("svg", {
+    className: "cstack-svg",
+    width: w * scale,
+    height: h * scale,
+    viewBox: `0 0 ${w} ${h}`,
+    "aria-hidden": "true"
+  }, Array.from({
+    length: drawn - 1
+  }, (_, k) => /*#__PURE__*/React.createElement("ellipse", {
+    key: k,
+    cx: cx,
+    cy: h - pad - ry - k * step,
+    rx: rx,
+    ry: ry,
+    fill: face.edge,
+    stroke: face.rim,
+    strokeWidth: "0.7"
+  })), /*#__PURE__*/React.createElement("ellipse", {
+    cx: cx,
+    cy: topCy,
+    rx: rx,
+    ry: ry,
+    fill: face.bg,
+    stroke: face.rim,
+    strokeWidth: "0.9"
+  }), spots.map(a => {
+    const t = a * Math.PI / 180;
+    return /*#__PURE__*/React.createElement("ellipse", {
+      key: a,
+      cx: cx + (rx - 3.1) * Math.cos(t),
+      cy: topCy + (ry - 2.1) * Math.sin(t),
+      rx: 3.1,
+      ry: 1.9,
+      transform: `rotate(${a} ${cx + (rx - 3.1) * Math.cos(t)} ${topCy + (ry - 2.1) * Math.sin(t)})`,
+      fill: face.spot,
+      opacity: "0.85"
+    });
+  }), /*#__PURE__*/React.createElement("ellipse", {
+    cx: cx,
+    cy: topCy,
+    rx: rx * 0.63,
+    ry: ry * 0.6,
+    fill: face.inner,
+    stroke: face.rim,
+    strokeWidth: "0.5"
+  }), /*#__PURE__*/React.createElement("text", {
+    x: cx,
+    y: topCy + 0.4,
+    textAnchor: "middle",
+    dominantBaseline: "central",
+    fontSize: "8",
+    fontWeight: "700",
+    fill: face.fg
+  }, shortAmt(value)));
+}
+
+/* Everyone's chips sit in front of them, as at a real table: a silent
+   pile per denomination, no numbers — the seat already shows the total. */
+function SeatChips({
+  amount,
   unit
 }) {
-  if (!owner || owner.stack <= 0) return null;
+  const {
+    stacks
+  } = chipBreakdown(amount, unit);
+  if (!stacks.length) return null;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "nchips"
+  }, stacks.slice(0, 5).map(s => /*#__PURE__*/React.createElement("span", {
+    className: "npile",
+    key: s.value
+  }, Array.from({
+    length: Math.min(s.count, 4)
+  }, (_, k) => /*#__PURE__*/React.createElement("i", {
+    key: k,
+    style: {
+      background: s.face.bg,
+      borderColor: s.face.rim
+    }
+  })))));
+}
+
+/* The viewer's own stack, spelled out. Purely a reading of the number
+   already on their seat — chips never move, because in a real game the
+   banker makes change without anyone thinking about it. */
+function ChipTray({
+  owner,
+  unit,
+  isMe
+}) {
+  if (!owner) return null;
   const {
     stacks,
     rest
   } = chipBreakdown(owner.stack, unit);
-  if (!stacks.length) return null;
+  const empty = !stacks.length;
   return /*#__PURE__*/React.createElement("div", {
     className: "tray"
   }, /*#__PURE__*/React.createElement("span", {
     className: "tray-who"
-  }, owner.name), /*#__PURE__*/React.createElement("div", {
+  }, isMe ? "내 칩" : owner.name + " 칩", /*#__PURE__*/React.createElement("b", {
+    className: "num"
+  }, fmt(owner.stack))), empty ? /*#__PURE__*/React.createElement("span", {
+    className: "tray-none"
+  }, owner.stack > 0 ? "가장 작은 칩보다 적습니다" : "칩 없음") : /*#__PURE__*/React.createElement("div", {
     className: "tray-stacks"
-  }, stacks.map(s => {
-    const shown = Math.min(s.count, 5);
-    return /*#__PURE__*/React.createElement("div", {
-      className: "cstack",
-      key: s.value
-    }, /*#__PURE__*/React.createElement("span", {
-      className: "cface",
-      style: {
-        background: s.face.bg,
-        borderColor: s.face.rim,
-        color: s.face.fg
-      }
-    }, shortAmt(s.value)), Array.from({
-      length: shown - 1
-    }, (_, k) => /*#__PURE__*/React.createElement("i", {
-      key: k,
-      className: "cedge",
-      style: {
-        background: s.face.bg,
-        borderColor: s.face.rim
-      }
-    })), /*#__PURE__*/React.createElement("span", {
-      className: "ccount"
-    }, "×", s.count));
-  })), rest > 0 && /*#__PURE__*/React.createElement("span", {
+  }, stacks.map(s => /*#__PURE__*/React.createElement("div", {
+    className: "cstack",
+    key: s.value
+  }, /*#__PURE__*/React.createElement(ChipStack, {
+    value: s.value,
+    count: s.count,
+    face: s.face
+  }), /*#__PURE__*/React.createElement("span", {
+    className: "ccount"
+  }, "×", s.count))), rest > 0 && /*#__PURE__*/React.createElement("span", {
     className: "tray-rest"
-  }, "+", fmt(rest)));
+  }, "+", fmt(rest))));
 }
 function Felt({
   game: g,
@@ -4701,7 +4807,10 @@ function Felt({
       className: "dealer"
     }, tag)), /*#__PURE__*/React.createElement("div", {
       className: "nstack num"
-    }, fmt(p.stack)), !st.live && /*#__PURE__*/React.createElement("span", {
+    }, fmt(p.stack)), /*#__PURE__*/React.createElement(SeatChips, {
+      amount: p.stack,
+      unit: unitOf(g)
+    }), !st.live && /*#__PURE__*/React.createElement("span", {
       className: "nstate"
     }, "폴드"), st.live && st.allIn && /*#__PURE__*/React.createElement("span", {
       className: "nstate allin"
@@ -4716,10 +4825,7 @@ function Felt({
     key: f.key,
     from: at(f.seat, R_SEAT),
     amount: f.amount
-  })), /*#__PURE__*/React.createElement(ChipTray, {
-    owner: g.players.find(p => p.id === (me ?? actorId)),
-    unit: unitOf(g)
-  }));
+  })));
 }
 function Table({
   game: g,
@@ -4800,7 +4906,11 @@ function Table({
     me: ctl.me
   })), /*#__PURE__*/React.createElement("div", {
     className: "stage-bottom"
-  }, h.showdown ? ctl.isHost ? /*#__PURE__*/React.createElement(Showdown, {
+  }, /*#__PURE__*/React.createElement(ChipTray, {
+    owner: g.players.find(p => p.id === (ctl.me ?? actor?.id)),
+    unit: unitOf(g),
+    isMe: ctl.me != null
+  }), h.showdown ? ctl.isHost ? /*#__PURE__*/React.createElement(Showdown, {
     players: g.players,
     showdown: h.showdown,
     onAward: ctl.award
@@ -5450,20 +5560,26 @@ const CSS = `
 .rule-row .chip{flex:0 0 auto; padding:9px 13px;}
 
 
-/* chip tray — the viewer's stack, read out in denominations */
-.tray{position:absolute; left:0; bottom:0; display:flex; flex-direction:column;
-  align-items:flex-start; gap:4px; pointer-events:none; max-width:56%;}
-.tray-who{font-size:11px; color:var(--dim); padding-left:2px;}
-.tray-stacks{display:flex; align-items:flex-end; gap:7px;}
-.tray-rest{font-size:10px; color:var(--dim); padding-left:2px;}
-.cstack{display:flex; flex-direction:column; align-items:center;}
-.cface{width:32px; height:19px; border-radius:50%; border:1px solid;
-  display:grid; place-items:center; font-size:9px; font-weight:700;
-  letter-spacing:-.02em; position:relative; z-index:2;}
-.cedge{display:block; width:32px; height:7px; border-radius:50%; border:1px solid;
-  margin-top:-4px;}
-.ccount{font-size:10px; color:var(--dim); margin-top:3px;
-  font-variant-numeric:tabular-nums;}
+
+
+/* chips in front of each seat — silhouettes only, the seat has the number */
+.nchips{display:flex; justify-content:center; align-items:flex-end; gap:3px; margin-top:5px;
+  min-height:11px;}
+.npile{display:flex; flex-direction:column-reverse; align-items:center;}
+.npile i{display:block; width:13px; height:4px; border-radius:50%; border:0.5px solid;
+  margin-top:-1.5px;}
+
+/* the viewer's own stack, spelled out, above the action buttons */
+.tray{display:flex; flex-direction:column; align-items:flex-start; gap:6px;
+  padding:0 2px 10px; margin-top:auto;}
+.tray-who{font-size:12px; color:var(--dim); display:flex; align-items:baseline; gap:8px;}
+.tray-who b{color:var(--bone); font-weight:600; font-size:14px;}
+.tray-stacks{display:flex; align-items:flex-end; gap:10px; flex-wrap:wrap;}
+.tray-none{font-size:12px; color:var(--dim);}
+.tray-rest{font-size:11px; color:var(--dim); align-self:flex-end; padding-bottom:14px;}
+.cstack{display:flex; flex-direction:column; align-items:center; gap:3px;}
+.cstack-svg{display:block; overflow:visible;}
+.ccount{font-size:10px; color:var(--dim); font-variant-numeric:tabular-nums;}
 
 @media (prefers-reduced-motion:reduce){ .pb-root *{transition:none !important;} }
 `;
