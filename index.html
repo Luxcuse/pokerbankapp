@@ -2779,13 +2779,96 @@ let ACTIVE_CFG = null;
    a player, and it survives reload.
    ──────────────────────────────────────────────────────────── */
 
-const STREETS = ["preflop", "flop", "turn", "river"];
-const STREET_KR = {
-  preflop: "프리플롭",
-  flop: "플롭",
-  turn: "턴",
-  river: "리버"
+/* The engine only knows "there are N betting rounds". Everything a
+   specific game adds — what the rounds are called, who opens each
+   one — is data, so a new game is a preset rather than new code. */
+const PRESETS = {
+  holdem: {
+    name: "홀덤",
+    rounds: 4,
+    firstAction: "button",
+    unit: 500,
+    blinds: {
+      sb: 500,
+      bb: 1000
+    },
+    labels: ["프리플롭", "플롭", "턴", "리버"]
+  },
+  seven: {
+    name: "세븐포커",
+    rounds: 4,
+    firstAction: "choose",
+    unit: 1000,
+    blinds: {
+      sb: 0,
+      bb: 0
+    },
+    labels: ["4구", "5구", "6구", "7구"]
+  }
 };
+const MAX_ROUNDS = 6;
+const UNITS = [100, 500, 1000, 5000];
+const roundLabel = (rules, i) => (PRESETS[rules.preset]?.labels || [])[i] || `${i + 1}라운드`;
+
+/* The smallest chip is also the smallest legal bet increment: one
+   setting, so the table and the numbers can never disagree. */
+const unitOf = g => Math.max(g.rules?.unit || 0, 1);
+/* Blinds can be zero, so the opening raise floor falls back to a chip. */
+const raiseFloor = g => Math.max(g.blinds.bb, unitOf(g));
+const noBlinds = blinds => blinds.sb === 0 && blinds.bb === 0;
+
+/* Denominations climb from the smallest chip on the ladder Korean cash
+   already uses: 500 → 500 / 1천 / 5천 / 1만 / 5만. */
+const CHIP_LADDER = [1, 2, 10, 20, 100];
+const CHIP_FACES = [{
+  bg: "#EDE7DA",
+  rim: "#B9B1A0",
+  fg: "#20242C"
+}, {
+  bg: "#C4453A",
+  rim: "#8E2E26",
+  fg: "#FFF3F0"
+}, {
+  bg: "#3B8F6B",
+  rim: "#26644A",
+  fg: "#F0FFF8"
+}, {
+  bg: "#2C3340",
+  rim: "#59637A",
+  fg: "#E9E4D8"
+}, {
+  bg: "#7A55A8",
+  rim: "#523379",
+  fg: "#F6EFFF"
+}];
+const chipDenoms = unit => CHIP_LADDER.map(m => unit * m);
+function shortAmt(v) {
+  if (v >= 10000 && v % 10000 === 0) return v / 10000 + "만";
+  if (v >= 1000 && v % 1000 === 0) return v / 1000 + "천";
+  return String(v);
+}
+
+/* Greedy split of a stack into chips, largest first. */
+function chipBreakdown(amount, unit) {
+  const denoms = chipDenoms(unit);
+  const stacks = [];
+  let rest = amount;
+  for (let i = denoms.length - 1; i >= 0; i--) {
+    const count = Math.floor(rest / denoms[i]);
+    if (count > 0) {
+      stacks.push({
+        value: denoms[i],
+        count,
+        face: CHIP_FACES[i % CHIP_FACES.length]
+      });
+      rest -= count * denoms[i];
+    }
+  }
+  return {
+    stacks,
+    rest
+  };
+}
 const ROLE_KR = {
   btn: "딜러",
   sb: "스몰",
@@ -2860,13 +2943,29 @@ function proposeRoles(g) {
     bb: players[bb].id
   };
 }
-function rolesValid(players, roles) {
+function rolesValid(players, roles, blinds) {
   if (!roles) return false;
   const ok = id => {
     const i = idxOf(players, id);
     return i >= 0 && players[i].stack > 0;
   };
+  if (blinds && noBlinds(blinds)) return ok(roles.btn) && seatedCount(players) >= 2;
   return ok(roles.btn) && ok(roles.sb) && ok(roles.bb) && roles.sb !== roles.bb;
+}
+
+/* Nobody posts anything when the blinds are zero, so the two blind
+   seats are bookkeeping — derive them and keep the picker to one row. */
+function fillRoles(players, roles, blinds) {
+  if (!roles || !blinds || !noBlinds(blinds)) return roles;
+  const btn = idxOf(players, roles.btn);
+  if (btn < 0) return roles;
+  const sb = nextSeated(players, btn);
+  const bb = seatedCount(players) === 2 ? btn : nextSeated(players, sb);
+  return {
+    btn: roles.btn,
+    sb: players[sb].id,
+    bb: players[bb].id
+  };
 }
 
 /* ── engine: betting helpers ────────────────────────────────── */
@@ -2912,6 +3011,12 @@ function newGame() {
       sb: 500,
       bb: 1000
     },
+    rules: {
+      preset: "holdem",
+      rounds: 4,
+      firstAction: "button",
+      unit: 500
+    },
     roles: null,
     // set on the setup screen before the first hand
     lastRoles: null,
@@ -2922,11 +3027,12 @@ function newGame() {
     phase: "setup" // setup | playing | between
   };
 }
-function startHand(g, roles) {
+function startHand(g, rawRoles) {
   const players = g.players.map(p => ({
     ...p
   }));
-  if (!rolesValid(players, roles)) return g;
+  const roles = fillRoles(players, rawRoles, g.blinds);
+  if (!rolesValid(players, roles, g.blinds)) return g;
   const btnIdx = idxOf(players, roles.btn);
   const sbIdx = idxOf(players, roles.sb);
   const bbIdx = idxOf(players, roles.bb);
@@ -2959,14 +3065,17 @@ function startHand(g, roles) {
     lastResult: null,
     phase: "playing",
     hand: {
-      street: "preflop",
+      round: 0,
       s,
       btnIdx,
       sbIdx,
       bbIdx,
       currentBet: Math.max(...players.map(p => s[p.id].bet)),
-      lastRaise: g.blinds.bb,
-      toAct: nextActive(players, s, bbIdx),
+      lastRaise: raiseFloor(g),
+      /* "choose" games decide the opener from the cards on the table,
+         which the app cannot see — so the table names it each round. */
+      pickFirst: g.rules.firstAction === "choose",
+      toAct: g.rules.firstAction === "choose" ? -1 : nextActive(players, s, bbIdx),
       showdown: null,
       log: []
     }
@@ -2991,7 +3100,8 @@ function settleStreet(g, players, h) {
     };
   }
   if (!streetClosed(players, h.s, h.currentBet)) return h;
-  if (actorCount(players, h.s) <= 1 || h.street === "river") {
+  const last = h.round >= g.rules.rounds - 1;
+  if (actorCount(players, h.s) <= 1 || last) {
     return {
       ...h,
       showdown: {
@@ -3011,17 +3121,19 @@ function settleStreet(g, players, h) {
       acted: false
     };
   });
+  const choose = g.rules.firstAction === "choose";
   return {
     ...h,
-    street: STREETS[STREETS.indexOf(h.street) + 1],
+    round: h.round + 1,
     s: s2,
     currentBet: 0,
-    lastRaise: g.blinds.bb,
-    toAct: nextActive(players, s2, h.btnIdx)
+    lastRaise: raiseFloor(g),
+    pickFirst: choose,
+    toAct: choose ? -1 : nextActive(players, s2, h.btnIdx)
   };
 }
 function act(g, kind, raiseTo, actorId) {
-  if (!g.hand || g.hand.showdown) return g;
+  if (!g.hand || g.hand.showdown || g.hand.pickFirst) return g;
   const idx = g.hand.toAct;
   const p = g.players[idx];
   if (!p) return g;
@@ -3067,9 +3179,13 @@ function act(g, kind, raiseTo, actorId) {
     note = allIn ? `${p.name} 올인 ${fmt(pay)}` : `${p.name} 콜 ${fmt(pay)}`;
   } else if (kind === "raise") {
     const wasOpen = h.currentBet === 0;
-    const target = Math.min(raiseTo, cur.bet + me.stack);
+    const maxTo = cur.bet + me.stack;
+    const target = Math.min(raiseTo, maxTo);
     const pay = target - cur.bet;
     if (pay <= 0) return g;
+    /* A short stack cannot always reach a round number, so an all-in
+       is allowed to sit between chips. Anything else may not. */
+    if (target !== maxTo && target % unitOf(g) !== 0) return g;
     me.stack -= pay;
     const allIn = me.stack === 0;
     const raiseSize = target - h.currentBet;
@@ -3100,6 +3216,25 @@ function act(g, kind, raiseTo, actorId) {
     players,
     hand: h,
     lastAction: note
+  };
+}
+function setFirstActor(g, playerId) {
+  const h = g.hand;
+  if (!h || !h.pickFirst || h.showdown) return g;
+  const i = idxOf(g.players, playerId);
+  if (i < 0) return g;
+  const st = h.s[playerId];
+  if (!st || !st.live || st.allIn) return g;
+  const name = g.players[i].name;
+  return {
+    ...g,
+    hand: {
+      ...h,
+      pickFirst: false,
+      toAct: i,
+      log: [`${name}부터`, ...h.log].slice(0, 8)
+    },
+    lastAction: `${roundLabel(g.rules, h.round)} 선공 ${name}`
   };
 }
 function awardPots(g, picks) {
@@ -3329,7 +3464,7 @@ const withHistory = (st, prev, label) => ({
 });
 const mAct = (kind, amount) => (st, ctx) => {
   const g = st.game;
-  if (!g.hand || g.hand.showdown) return null;
+  if (!g.hand || g.hand.showdown || g.hand.pickFirst) return null;
   const actor = g.players[g.hand.toAct];
   if (!actor) return null;
   const isHost = ctx.uid === ctx.hostUid;
@@ -3354,6 +3489,14 @@ const mStart = roles => hostOnly(st => {
 const mAward = picks => hostOnly(st => {
   if (!st.game.hand?.showdown) return null;
   const next = awardPots(st.game, picks);
+  return {
+    game: next,
+    ...withHistory(st, st.game, next.lastAction)
+  };
+});
+const mFirst = playerId => hostOnly(st => {
+  const next = setFirstActor(st.game, playerId);
+  if (next === st.game) return null;
   return {
     game: next,
     ...withHistory(st, st.game, next.lastAction)
@@ -3770,6 +3913,10 @@ function LocalApp({
       commit(n, n.lastAction);
     },
     startHand: roles => commit(startHand(game, roles), "핸드 시작"),
+    pickFirst: pid => {
+      const n = setFirstActor(game, pid);
+      commit(n, n.lastAction);
+    },
     award: picks => {
       const n = awardPots(game, picks);
       commit(n, n.lastAction);
@@ -3884,12 +4031,13 @@ function RoomApp({
     code,
     proxy: isHost,
     canAct: () => {
-      if (!g.hand || g.hand.showdown) return false;
+      if (!g.hand || g.hand.showdown || g.hand.pickFirst) return false;
       const actor = g.players[g.hand.toAct];
       return !!actor && (actor.id === me || isHost);
     },
     act: (kind, v) => send(mAct(kind, v)),
     startHand: roles => send(mStart(roles)),
+    pickFirst: pid => send(mFirst(pid)),
     award: picks => send(mAward(picks)),
     edit: next => send(mEdit(next)),
     undo: () => send(mUndo),
@@ -4006,7 +4154,7 @@ function Lobby({
     }
   };
   const roles = g.roles ?? defaultRoles(g.players);
-  const ready = rolesValid(g.players, roles);
+  const ready = rolesValid(g.players, roles, g.blinds);
   const joined = g.players.filter(p => seats[p.id]).length;
   return /*#__PURE__*/React.createElement("div", {
     className: "wrap"
@@ -4054,6 +4202,7 @@ function Lobby({
   }, "첫 판 역할"), /*#__PURE__*/React.createElement(RolePicker, {
     players: g.players,
     roles: roles,
+    blinds: g.blinds,
     onChange: r => ctl.edit({
       ...g,
       roles: r
@@ -4116,15 +4265,17 @@ function QR({
 function RolePicker({
   players,
   roles,
-  onChange
+  onChange,
+  blinds
 }) {
   const set = (key, id) => onChange({
     ...roles,
     [key]: id
   });
+  const keys = blinds && noBlinds(blinds) ? ["btn"] : ["btn", "sb", "bb"];
   return /*#__PURE__*/React.createElement("div", {
     className: "roles"
-  }, ["btn", "sb", "bb"].map(key => /*#__PURE__*/React.createElement("div", {
+  }, keys.map(key => /*#__PURE__*/React.createElement("div", {
     className: "role-row",
     key: key
   }, /*#__PURE__*/React.createElement("span", {
@@ -4140,11 +4291,15 @@ function RolePicker({
 }
 function RoleLine({
   players,
-  roles
+  roles,
+  blinds
 }) {
   const nm = id => players.find(p => p.id === id)?.name ?? "—";
   if (!roles) return null;
   const btnIsSb = roles.btn === roles.sb;
+  if (blinds && noBlinds(blinds)) return /*#__PURE__*/React.createElement("p", {
+    className: "role-line"
+  }, /*#__PURE__*/React.createElement("b", null, nm(roles.btn)), " 딜러");
   return /*#__PURE__*/React.createElement("p", {
     className: "role-line"
   }, btnIsSb ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("b", null, nm(roles.btn)), " 딜러·스몰 \xA0 ", /*#__PURE__*/React.createElement("b", null, nm(roles.bb)), " 빅") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("b", null, nm(roles.btn)), " 딜러 \xA0 ", /*#__PURE__*/React.createElement("b", null, nm(roles.sb)), " 스몰 \xA0", " ", /*#__PURE__*/React.createElement("b", null, nm(roles.bb)), " 빅"));
@@ -4166,7 +4321,7 @@ function Setup({
   const [stack, setStack] = useState(50000);
   const g = game;
   const roles = g.roles ?? defaultRoles(g.players);
-  const ready = rolesValid(g.players, roles);
+  const ready = rolesValid(g.players, roles, g.blinds);
   const setPlayers = players => onEdit({
     ...g,
     players
@@ -4213,6 +4368,88 @@ function Setup({
   }, "Poker", /*#__PURE__*/React.createElement("span", null, "Bank")), /*#__PURE__*/React.createElement("p", {
     className: "lede"
   }, "칩은 앱이 셉니다. 카드만 돌리세요.")), /*#__PURE__*/React.createElement("section", {
+    className: "panel"
+  }, /*#__PURE__*/React.createElement("h2", {
+    className: "panel-title"
+  }, "게임"), /*#__PURE__*/React.createElement("div", {
+    className: "chips"
+  }, Object.entries(PRESETS).map(([key, ps]) => /*#__PURE__*/React.createElement("button", {
+    key: key,
+    className: "chip" + (g.rules.preset === key ? " on" : ""),
+    onClick: () => onEdit({
+      ...g,
+      blinds: {
+        ...ps.blinds
+      },
+      rules: {
+        preset: key,
+        rounds: ps.rounds,
+        firstAction: ps.firstAction,
+        unit: ps.unit
+      }
+    })
+  }, ps.name))), /*#__PURE__*/React.createElement("div", {
+    className: "rule-row"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "role-name"
+  }, "라운드"), /*#__PURE__*/React.createElement("div", {
+    className: "role-picks"
+  }, Array.from({
+    length: MAX_ROUNDS - 1
+  }, (_, k) => k + 2).map(n => /*#__PURE__*/React.createElement("button", {
+    key: n,
+    className: "chip" + (g.rules.rounds === n ? " on" : ""),
+    onClick: () => onEdit({
+      ...g,
+      rules: {
+        ...g.rules,
+        rounds: n,
+        preset: "custom"
+      }
+    })
+  }, n)))), /*#__PURE__*/React.createElement("div", {
+    className: "rule-row"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "role-name"
+  }, "최소 칩"), /*#__PURE__*/React.createElement("div", {
+    className: "role-picks"
+  }, UNITS.map(u => /*#__PURE__*/React.createElement("button", {
+    key: u,
+    className: "chip" + (g.rules.unit === u ? " on" : ""),
+    onClick: () => onEdit({
+      ...g,
+      rules: {
+        ...g.rules,
+        unit: u
+      }
+    })
+  }, fmt(u))))), /*#__PURE__*/React.createElement("div", {
+    className: "rule-row"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "role-name"
+  }, "선공"), /*#__PURE__*/React.createElement("div", {
+    className: "role-picks"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "chip" + (g.rules.firstAction === "button" ? " on" : ""),
+    onClick: () => onEdit({
+      ...g,
+      rules: {
+        ...g.rules,
+        firstAction: "button"
+      }
+    })
+  }, "딜러 기준"), /*#__PURE__*/React.createElement("button", {
+    className: "chip" + (g.rules.firstAction === "choose" ? " on" : ""),
+    onClick: () => onEdit({
+      ...g,
+      rules: {
+        ...g.rules,
+        firstAction: "choose"
+      }
+    })
+  }, "매 라운드 지정"))), /*#__PURE__*/React.createElement("p", {
+    className: "hint"
+  }, g.rules.firstAction === "choose" ? "라운드가 바뀔 때마다 누구부터 시작할지 물어봅니다." : "딜러 자리를 기준으로 자동으로 정합니다.", " 베팅은 " + fmt(g.rules.unit) + " 단위로만 가능합니다.")), /*#__PURE__*/React.createElement("section", {
     className: "panel"
   }, /*#__PURE__*/React.createElement("h2", {
     className: "panel-title"
@@ -4295,11 +4532,12 @@ function Setup({
   }, "첫 판 역할"), /*#__PURE__*/React.createElement(RolePicker, {
     players: g.players,
     roles: roles,
+    blinds: g.blinds,
     onChange: r => onEdit({
       ...g,
       roles: r
     })
-  }), roles && roles.sb === roles.bb && /*#__PURE__*/React.createElement("p", {
+  }), roles && !noBlinds(g.blinds) && roles.sb === roles.bb && /*#__PURE__*/React.createElement("p", {
     className: "warn"
   }, "스몰과 빅은 다른 사람이어야 합니다.")), error && /*#__PURE__*/React.createElement("p", {
     className: "warn"
@@ -4350,6 +4588,54 @@ function Fly({
       top: `${at.y}%`
     }
   }, fmt(amount));
+}
+
+/* The viewer's own stack, broken into chips. Purely a reading of the
+   number already on their seat — chips are never moved around, because
+   in a real game the banker makes change without anyone thinking. */
+function ChipTray({
+  owner,
+  unit
+}) {
+  if (!owner || owner.stack <= 0) return null;
+  const {
+    stacks,
+    rest
+  } = chipBreakdown(owner.stack, unit);
+  if (!stacks.length) return null;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "tray"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "tray-who"
+  }, owner.name), /*#__PURE__*/React.createElement("div", {
+    className: "tray-stacks"
+  }, stacks.map(s => {
+    const shown = Math.min(s.count, 5);
+    return /*#__PURE__*/React.createElement("div", {
+      className: "cstack",
+      key: s.value
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "cface",
+      style: {
+        background: s.face.bg,
+        borderColor: s.face.rim,
+        color: s.face.fg
+      }
+    }, shortAmt(s.value)), Array.from({
+      length: shown - 1
+    }, (_, k) => /*#__PURE__*/React.createElement("i", {
+      key: k,
+      className: "cedge",
+      style: {
+        background: s.face.bg,
+        borderColor: s.face.rim
+      }
+    })), /*#__PURE__*/React.createElement("span", {
+      className: "ccount"
+    }, "×", s.count));
+  })), rest > 0 && /*#__PURE__*/React.createElement("span", {
+    className: "tray-rest"
+  }, "+", fmt(rest)));
 }
 function Felt({
   game: g,
@@ -4430,7 +4716,10 @@ function Felt({
     key: f.key,
     from: at(f.seat, R_SEAT),
     amount: f.amount
-  })));
+  })), /*#__PURE__*/React.createElement(ChipTray, {
+    owner: g.players.find(p => p.id === (me ?? actorId)),
+    unit: unitOf(g)
+  }));
 }
 function Table({
   game: g,
@@ -4480,7 +4769,7 @@ function Table({
   }, [g]);
   const bar = /*#__PURE__*/React.createElement(TopBar, {
     handNo: g.handNo,
-    street: g.hand?.street,
+    round: g.hand ? roundLabel(g.rules, g.hand.round) : null,
     code: ctl.code,
     undoLabel: ctl.isHost ? ctl.undoLabel : null,
     onUndo: ctl.undo,
@@ -4498,9 +4787,9 @@ function Table({
     me: ctl.me
   }));
   const h = g.hand;
-  const actor = h.showdown ? null : g.players[h.toAct];
+  const actor = h.showdown || h.pickFirst ? null : g.players[h.toAct];
   const pot = potTotal(g.players, h.s);
-  const mayAct = ctl.canAct();
+  const mayAct = !!actor && ctl.canAct();
   return /*#__PURE__*/React.createElement("div", {
     className: "stage"
   }, bar, /*#__PURE__*/React.createElement("div", {
@@ -4517,7 +4806,12 @@ function Table({
     onAward: ctl.award
   }) : /*#__PURE__*/React.createElement("p", {
     className: "waiting"
-  }, "딜러가 팟을 나누는 중입니다") : mayAct ? /*#__PURE__*/React.createElement(ActionBar, {
+  }, "딜러가 팟을 나누는 중입니다") : h.pickFirst ? ctl.isHost ? /*#__PURE__*/React.createElement(FirstActor, {
+    game: g,
+    onPick: ctl.pickFirst
+  }) : /*#__PURE__*/React.createElement("p", {
+    className: "waiting"
+  }, /*#__PURE__*/React.createElement("b", null, roundLabel(g.rules, h.round)), " — 선공을 정하는 중") : mayAct ? /*#__PURE__*/React.createElement(ActionBar, {
     actor: actor,
     st: h.s[actor.id],
     currentBet: h.currentBet,
@@ -4532,13 +4826,13 @@ function Table({
     className: "log"
   }, h.log[0] ?? "\u00a0"), /*#__PURE__*/React.createElement("p", {
     className: "waiting"
-  }, /*#__PURE__*/React.createElement("b", null, actor.name), " 차례를 기다리는 중"))), raiseOpen && !h.showdown && mayAct && /*#__PURE__*/React.createElement(RaiseSheet, {
+  }, /*#__PURE__*/React.createElement("b", null, actor.name), " 차례를 기다리는 중"))), raiseOpen && mayAct && /*#__PURE__*/React.createElement(RaiseSheet, {
     actor: actor,
     st: h.s[actor.id],
     currentBet: h.currentBet,
     lastRaise: h.lastRaise,
     pot: pot,
-    step: g.blinds.sb,
+    unit: unitOf(g),
     onClose: () => setRaiseOpen(false),
     onConfirm: v => {
       setRaiseOpen(false);
@@ -4556,7 +4850,7 @@ function NextHand({
   const proposed = useMemo(() => proposeRoles(g), [g]);
   const [custom, setCustom] = useState(null);
   const roles = custom ?? proposed;
-  const ready = rolesValid(g.players, roles);
+  const ready = rolesValid(g.players, roles, g.blinds);
   if (!ctl.isHost) return /*#__PURE__*/React.createElement("div", {
     className: "between"
   }, g.lastResult && /*#__PURE__*/React.createElement("p", {
@@ -4587,8 +4881,9 @@ function NextHand({
   }, "역할 직접 지정"), /*#__PURE__*/React.createElement(RolePicker, {
     players: g.players,
     roles: roles,
+    blinds: g.blinds,
     onChange: setCustom
-  }), roles.sb === roles.bb && /*#__PURE__*/React.createElement("p", {
+  }), !noBlinds(g.blinds) && roles.sb === roles.bb && /*#__PURE__*/React.createElement("p", {
     className: "warn"
   }, "스몰과 빅은 다른 사람이어야 합니다."), /*#__PURE__*/React.createElement("div", {
     className: "two-up"
@@ -4603,7 +4898,8 @@ function NextHand({
     className: "ask"
   }, "이 역할로 시작할까요?"), /*#__PURE__*/React.createElement(RoleLine, {
     players: g.players,
-    roles: proposed
+    roles: proposed,
+    blinds: g.blinds
   }), /*#__PURE__*/React.createElement("div", {
     className: "two-up wide-row"
   }, /*#__PURE__*/React.createElement("button", {
@@ -4617,9 +4913,29 @@ function NextHand({
     onClick: onSeats
   }, "자리 편집"));
 }
+function FirstActor({
+  game: g,
+  onPick
+}) {
+  const h = g.hand;
+  const able = g.players.filter(p => h.s[p.id].live && !h.s[p.id].allIn);
+  return /*#__PURE__*/React.createElement("div", {
+    className: "panel-act"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "log"
+  }, h.log[0] ?? "\u00a0"), /*#__PURE__*/React.createElement("p", {
+    className: "turn"
+  }, /*#__PURE__*/React.createElement("b", null, roundLabel(g.rules, h.round)), " — 누구부터 시작하나요?"), /*#__PURE__*/React.createElement("div", {
+    className: "sd-picks center-wrap"
+  }, able.map(p => /*#__PURE__*/React.createElement("button", {
+    key: p.id,
+    className: "pick",
+    onClick: () => onPick(p.id)
+  }, p.name))));
+}
 function TopBar({
   handNo,
-  street,
+  round,
   code,
   undoLabel,
   onUndo,
@@ -4631,7 +4947,7 @@ function TopBar({
     className: "meta"
   }, code && /*#__PURE__*/React.createElement("i", {
     className: "code"
-  }, code), "핸드 ", handNo, street && /*#__PURE__*/React.createElement("em", null, STREET_KR[street])), /*#__PURE__*/React.createElement("div", {
+  }, code), "핸드 ", handNo, round && /*#__PURE__*/React.createElement("em", null, round)), /*#__PURE__*/React.createElement("div", {
     className: "topbar-acts"
   }, onUndo && /*#__PURE__*/React.createElement("button", {
     className: "link",
@@ -4715,15 +5031,18 @@ function RaiseSheet({
   currentBet,
   lastRaise,
   pot,
-  step,
+  unit,
   onClose,
   onConfirm
 }) {
   const maxTo = st.bet + actor.stack;
-  const minTo = Math.min(currentBet + lastRaise, maxTo);
+  const rawMin = Math.min(currentBet + lastRaise, maxTo);
+  /* Every amount sits on a chip boundary; only an all-in may not. */
+  const minTo = rawMin >= maxTo ? maxTo : Math.min(Math.ceil(rawMin / unit) * unit, maxTo);
   const callAmt = currentBet - st.bet;
   const potAfterCall = pot + callAmt;
-  const round = v => Math.max(minTo, Math.min(maxTo, Math.round(v / step) * step));
+  const round = v => Math.max(minTo, Math.min(maxTo, Math.round(v / unit) * unit));
+  const snap = v => v >= maxTo ? maxTo : round(v);
   const [val, setVal] = useState(minTo);
   const shortcuts = [{
     label: "최소",
@@ -4746,13 +5065,16 @@ function RaiseSheet({
     onClick: e => e.stopPropagation()
   }, /*#__PURE__*/React.createElement("p", {
     className: "sheet-title"
-  }, actor.name, " · 얼마까지"), /*#__PURE__*/React.createElement("div", {
-    className: "sheet-num num"
-  }, fmt(val)), /*#__PURE__*/React.createElement("input", {
+  }, actor.name, " · 얼마까지"), /*#__PURE__*/React.createElement("input", {
+    className: "sheet-num num",
+    type: "number",
+    value: val,
+    onChange: e => setVal(Math.max(minTo, Math.min(maxTo, Number(e.target.value) || 0)))
+  }), /*#__PURE__*/React.createElement("input", {
     type: "range",
     min: minTo,
     max: maxTo,
-    step: step,
+    step: unit,
     value: val,
     onChange: e => setVal(Number(e.target.value))
   }), /*#__PURE__*/React.createElement("div", {
@@ -4768,7 +5090,7 @@ function RaiseSheet({
     onClick: onClose
   }, "취소"), /*#__PURE__*/React.createElement("button", {
     className: "btn primary grow",
-    onClick: () => onConfirm(val)
+    onClick: () => onConfirm(snap(val))
   }, val === maxTo ? "올인" : `${fmt(val)}까지`))));
 }
 function Showdown({
@@ -5118,6 +5440,30 @@ const CSS = `
 
 .link-out{font-size:12px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   text-align:center; width:100%;}
+
+
+.center-wrap{justify-content:center;}
+
+
+.rule-row{display:flex; align-items:flex-start; gap:12px; margin-top:12px;}
+.rule-row .role-picks{gap:7px;}
+.rule-row .chip{flex:0 0 auto; padding:9px 13px;}
+
+
+/* chip tray — the viewer's stack, read out in denominations */
+.tray{position:absolute; left:0; bottom:0; display:flex; flex-direction:column;
+  align-items:flex-start; gap:4px; pointer-events:none; max-width:56%;}
+.tray-who{font-size:11px; color:var(--dim); padding-left:2px;}
+.tray-stacks{display:flex; align-items:flex-end; gap:7px;}
+.tray-rest{font-size:10px; color:var(--dim); padding-left:2px;}
+.cstack{display:flex; flex-direction:column; align-items:center;}
+.cface{width:32px; height:19px; border-radius:50%; border:1px solid;
+  display:grid; place-items:center; font-size:9px; font-weight:700;
+  letter-spacing:-.02em; position:relative; z-index:2;}
+.cedge{display:block; width:32px; height:7px; border-radius:50%; border:1px solid;
+  margin-top:-4px;}
+.ccount{font-size:10px; color:var(--dim); margin-top:3px;
+  font-variant-numeric:tabular-nums;}
 
 @media (prefers-reduced-motion:reduce){ .pb-root *{transition:none !important;} }
 `;
